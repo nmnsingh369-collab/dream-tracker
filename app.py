@@ -1,12 +1,10 @@
 import streamlit as st
 import pandas as pd
-import json
-import os
 import datetime
+from streamlit_gsheets import GSheetsConnection
 
 # --- CONFIGURATION ---
-DATA_FILE = "my_progress.json"
-DREAM_COLLEGE = "AIIMS DELHI" 
+DREAM_COLLEGE = "AIIMS DELHI"
 USER_NAME = "Future Topper"
 
 # --- MOTIVATIONAL QUOTES ---
@@ -21,7 +19,7 @@ QUOTES = [
     "Success is the sum of small efforts, repeated day in and day out."
 ]
 
-# --- FULL SYLLABUS DATA ---
+# --- FULL SYLLABUS DATA (Structure Only) ---
 INITIAL_DATA = {
     "Class 9 (Foundation)": {
         "Physics": ["Motion", "Force and Laws of Motion", "Gravitation", "Work and Energy", "Sound"],
@@ -31,7 +29,7 @@ INITIAL_DATA = {
     "Class 10 (Foundation)": {
         "Physics": ["Light: Reflection and Refraction", "The Human Eye", "Electricity", "Magnetic Effects of Electric Current"],
         "Chemistry": ["Chemical Reactions and Equations", "Acids, Bases and Salts", "Metals and Non-metals", "Carbon and its Compounds"],
-        "Biology": ["Life Processes", "Control and Coordination", "How do Organisms Reproduce?", "Heredity", "Our Environment"]
+        "Biology": ["Life Processes", "Control and Coordination", "How do Organisms Reproduce", "Heredity", "Our Environment"]
     },
     "Class 11 (NEET Core)": {
         "Physics": ["Units and Measurements", "Motion in a Straight Line", "Motion in a Plane", "Laws of Motion", "Work, Energy and Power", "System of Particles and Rotational Motion", "Gravitation", "Mechanical Properties of Solids", "Mechanical Properties of Fluids", "Thermal Properties of Matter", "Thermodynamics", "Kinetic Theory", "Oscillations", "Waves"],
@@ -45,40 +43,48 @@ INITIAL_DATA = {
     }
 }
 
-# --- FUNCTIONS ---
+# --- GOOGLE SHEETS FUNCTIONS ---
 
-def load_data():
-    """Loads progress. Handles crashes if data is old/corrupted."""
-    if not os.path.exists(DATA_FILE):
-        return create_new_data()
+def get_data():
+    """Fetches data from Google Sheets or initializes it if empty."""
+    conn = st.connection("gsheets", type=GSheetsConnection)
     
     try:
-        with open(DATA_FILE, "r") as f:
-            data = json.load(f)
-            # Simple check to see if data matches our new structure
-            if "Class 9 (Foundation)" not in data:
-                return create_new_data() # Reset if old structure found
-            return data
+        # Try to read the existing data
+        df = conn.read()
+        # If the sheet is empty or new, df might be empty. Check structure.
+        if df.empty or "Chapter" not in df.columns:
+            return reset_data(conn)
+        return df
     except:
-        return create_new_data() # Reset if file is broken
+        # If any error (file not found/empty), reset
+        return reset_data(conn)
 
-def create_new_data():
-    """Creates a fresh database based on INITIAL_DATA"""
-    tracker = {}
+def reset_data(conn):
+    """Creates the initial database structure and uploads to Sheets."""
+    rows = []
     for grade, subjects in INITIAL_DATA.items():
-        tracker[grade] = {}
         for sub, chapters in subjects.items():
-            tracker[grade][sub] = {}
             for chap in chapters:
-                tracker[grade][sub][chap] = {"Revision": False, "MCQ": False, "PYQ": False}
-    with open(DATA_FILE, "w") as f:
-        json.dump(tracker, f)
-    return tracker
+                rows.append({
+                    "Class": grade,
+                    "Subject": sub,
+                    "Chapter": chap,
+                    "Revision": False,
+                    "MCQ": False,
+                    "PYQ": False
+                })
+    
+    df = pd.DataFrame(rows)
+    conn.update(data=df)
+    st.cache_data.clear() # Clear cache to ensure reload
+    return df
 
-def save_data(data):
-    """Saves current progress to JSON."""
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f)
+def update_data(df):
+    """Updates the Google Sheet with the modified dataframe."""
+    conn = st.connection("gsheets", type=GSheetsConnection)
+    conn.update(data=df)
+    st.cache_data.clear()
 
 def get_daily_quote():
     day_of_year = datetime.datetime.now().timetuple().tm_yday
@@ -89,8 +95,8 @@ def get_daily_quote():
 def main():
     st.set_page_config(page_title="Dream Tracker", page_icon="🎯", layout="wide")
     
-    # Load Data
-    progress_data = load_data()
+    # 1. Load Data
+    df = get_data()
 
     # Sidebar
     with st.sidebar:
@@ -100,35 +106,31 @@ def main():
         
         # Navigation
         st.write("### Navigation")
-        # Ensure the keys are converted to a list for the selectbox
-        class_list = list(progress_data.keys())
+        
+        class_list = df["Class"].unique().tolist()
+        # sort explicitly to keep order if possible, or just use unique
         selected_class = st.selectbox("Select Class", class_list)
         
-        subject_list = list(progress_data[selected_class].keys())
+        subject_list = df[df["Class"] == selected_class]["Subject"].unique().tolist()
         selected_subject = st.selectbox("Select Subject", subject_list)
         
         st.divider()
-        if st.button("⚠ Reset All Progress"):
-            if os.path.exists(DATA_FILE):
-                os.remove(DATA_FILE)
-                st.rerun()
+        if st.button("⚠ Reset All Progress (Clear Sheet)"):
+            conn = st.connection("gsheets", type=GSheetsConnection)
+            reset_data(conn)
+            st.rerun()
 
     # Main Content
     st.title(f"🚀 Goal: {DREAM_COLLEGE}")
     
     # --- CALCULATE TOTAL PROGRESS ---
-    total_tasks = 0
-    completed_tasks = 0
+    # Convert True/False columns to numeric (1/0) for calculation
+    total_tasks = len(df) * 3
+    completed_rev = df["Revision"].sum()
+    completed_mcq = df["MCQ"].sum()
+    completed_pyq = df["PYQ"].sum()
     
-    for grade in progress_data:
-        for sub in progress_data[grade]:
-            for chap in progress_data[grade][sub]:
-                tasks = progress_data[grade][sub][chap]
-                total_tasks += 3 
-                if tasks["Revision"]: completed_tasks += 1
-                if tasks["MCQ"]: completed_tasks += 1
-                if tasks["PYQ"]: completed_tasks += 1
-
+    completed_tasks = completed_rev + completed_mcq + completed_pyq
     overall_percentage = (completed_tasks / total_tasks) * 100 if total_tasks > 0 else 0
     
     st.write(f"### Syllabus Completion: **{overall_percentage:.2f}%**")
@@ -143,22 +145,24 @@ def main():
     # --- CHAPTER LIST ---
     st.subheader(f"📚 {selected_class} - {selected_subject}")
     
-    chapters_dict = progress_data[selected_class][selected_subject]
+    # Filter data for current view
+    # We create a copy to edit, then push back to main df
+    current_view = df[(df["Class"] == selected_class) & (df["Subject"] == selected_subject)].copy()
     
-    for chapter, tasks in chapters_dict.items():
+    changes_made = False
+
+    for index, row in current_view.iterrows():
         with st.container():
             col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
             
             with col1:
-                st.markdown(f"**{chapter}**")
+                st.markdown(f"**{row['Chapter']}**")
             
             # Checkboxes
-            with col2:
-                rev = st.checkbox("Revise", value=tasks["Revision"], key=f"{chapter}_rev")
-            with col3:
-                mcq = st.checkbox("MCQs", value=tasks["MCQ"], key=f"{chapter}_mcq")
-            with col4:
-                pyq = st.checkbox("PYQs", value=tasks["PYQ"], key=f"{chapter}_pyq")
+            # We use the unique index from the dataframe as the key
+            rev = st.checkbox("Revise", value=bool(row["Revision"]), key=f"{index}_rev")
+            mcq = st.checkbox("MCQs", value=bool(row["MCQ"]), key=f"{index}_mcq")
+            pyq = st.checkbox("PYQs", value=bool(row["PYQ"]), key=f"{index}_pyq")
             
             # Mini Progress
             chap_score = sum([rev, mcq, pyq])
@@ -168,14 +172,19 @@ def main():
                 else:
                     st.write(f"{int((chap_score/3)*100)}%")
 
-            # Save if changed
-            if rev != tasks["Revision"] or mcq != tasks["MCQ"] or pyq != tasks["PYQ"]:
-                progress_data[selected_class][selected_subject][chapter]["Revision"] = rev
-                progress_data[selected_class][selected_subject][chapter]["MCQ"] = mcq
-                progress_data[selected_class][selected_subject][chapter]["PYQ"] = pyq
-                save_data(progress_data)
-                st.rerun()
+            # Check for changes
+            if rev != row["Revision"] or mcq != row["MCQ"] or pyq != row["PYQ"]:
+                df.at[index, "Revision"] = rev
+                df.at[index, "MCQ"] = mcq
+                df.at[index, "PYQ"] = pyq
+                changes_made = True
+
         st.divider()
+
+    # Save logic outside the loop to batch updates (faster)
+    if changes_made:
+        update_data(df)
+        st.rerun()
 
 if __name__ == "__main__":
     main()
